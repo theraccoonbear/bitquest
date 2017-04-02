@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.lang.SystemUtils;
 import org.bukkit.Bukkit;
+import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
@@ -19,6 +20,7 @@ import java.net.URLEncoder;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.util.Random;
+import java.util.Hashtable;
 
 /**
  * Created by cristian on 12/15/15.
@@ -26,6 +28,9 @@ import java.util.Random;
 public class Wallet {
     public int balance;
     public int confirmedBalance;
+    public int unconfirmedBalance;
+    public JSONObject jsonobj;
+    
     public Wallet(String address,String privatekey) {
         this.address=address;
         this.privatekey=privatekey;
@@ -35,14 +40,32 @@ public class Wallet {
     }
     public String address=null;
     private String privatekey=null;
+    
     int balance() {
         this.updateBalance();
         return this.balance;
     }
-    void updateBalance() {
+    
+
+    
+    public int getBlockchainHeight() {
+        JSONObject jsonobj = this.makeBlockCypherCall("https://api.blockcypher.com/v1/btc/main");
+        return ((Number) jsonobj.get("height")).intValue();
+    }
+    
+    public JSONObject getWalletStatus(String walletAddress) {
+        this.jsonobj = this.makeBlockCypherCall("https://api.blockcypher.com/v1/btc/main/addrs/" + walletAddress);
+        return this.jsonobj;
+    }
+    
+    // @todo: make this just accept the endpoint name and (optional) parameters
+    public JSONObject makeBlockCypherCall(String requestedURL) {
+        JSONParser parser = new JSONParser();
+        
         try {
-            System.out.println("updating balance...");
-            URL url = new URL("https://api.blockcypher.com/v1/btc/main/addrs/"+address+"/balance?token=" + BitQuest.BLOCKCYPHER_API_KEY);
+            System.out.println("Making Blockcypher API call...");
+            // @todo: add support for some extra params in this method (allow passing in an optional hash/dictionary/whatever Java calls it)?
+            URL url = new URL(requestedURL + "?token=" + BitQuest.BLOCKCYPHER_API_KEY);
 
             System.out.println(url.toString());
             HttpsURLConnection con = (HttpsURLConnection) url.openConnection();
@@ -61,17 +84,65 @@ public class Wallet {
                 response.append(inputLine);
             }
             in.close();
-
-            JSONParser parser = new JSONParser();
-            final JSONObject jsonobj = (JSONObject) parser.parse(response.toString());
+            
+            System.out.println("JSON response: " + response.toString());
+            
+            return (JSONObject) parser.parse(response.toString());
+        } catch (IOException e) {
+            System.out.println("problem making API call");
+            System.out.println(e);
+            // Unable to call API?
+        } catch (ParseException e) {
+            // Bad JSON?
+        }
+        
+        return new JSONObject(); // just give them an empty object
+    }
+    
+    void updateBalance() {
+        System.out.println("updating balance...");
+        final JSONObject jsonobj = this.getWalletStatus(address);
+        if (jsonobj.keySet().contains("final_balance")) {
             this.balance = ((Number) jsonobj.get("final_balance")).intValue();
             this.confirmedBalance = ((Number) jsonobj.get("balance")).intValue();
-        } catch (IOException e) {
-            System.out.println("problem updating balance");
-            System.out.println(e);
-            // wallet might be new and it's not listed on the blockchain yet
-        } catch (ParseException e) {
-            // There is a problem with the balance API
+            this.unconfirmedBalance = ((Number) jsonobj.get("unconfirmed_balance")).intValue();
+            JSONArray txs = (JSONArray) jsonobj.get("txrefs");
+            System.out.println("Wallet " + address + " balances:");
+            System.out.println("  Balance: " + this.balance + "SAT");
+            System.out.println("  Confirmed Balance: " + this.confirmedBalance + "SAT");
+            System.out.println("  Unconfirmed Spends: " + this.unconfirmedBalance + "SAT");
+            
+            Hashtable<String, Integer> tx_confs = new Hashtable<String, Integer>();
+            Hashtable<String, Integer> tx_inputs = new Hashtable<String, Integer>();
+            Hashtable<String, Integer> tx_outputs = new Hashtable<String, Integer>();
+            
+            for (int i = 0; i < txs.size(); i++) {
+                JSONObject tx = (JSONObject) txs.get(i);
+                String hash = ((String) tx.get("tx_hash")).toString();
+                int confirmations = ((Number) tx.get("confirmations")).intValue();
+                int input_n = ((Number) tx.get("tx_input_n")).intValue();
+                int output_n = ((Number) tx.get("tx_output_n")).intValue();
+                if (output_n < 0 || input_n >= 0) {
+                    Integer orig_inp = 0;
+                    if (tx_inputs.containsKey(hash)) {
+                        orig_inp = tx_inputs.get(hash);
+                    }
+                    tx_inputs.put(hash, orig_inp + 1);
+                }
+                
+                tx_confs.put(hash, confirmations);
+                //System.out.println(hash + " = " + input_n + ", " + output_n + ", " + confirmations);
+            }
+            
+            for (String hash: tx_inputs.keySet()) {
+                Integer inputs = tx_inputs.get(hash);
+                Integer confirmations = tx_confs.get(hash);
+                System.out.println("  tx: " + hash + " has " + confirmations + " confirmation(s) and " + inputs + " input(s)");
+            }
+            
+            
+        } else {
+            System.out.println("No reported final_balance in wallet: " + address);
         }
 
     }
